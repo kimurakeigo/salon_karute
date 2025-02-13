@@ -214,21 +214,35 @@ def main():
         
     elif choice == "✂️ 施術履歴":
         st.subheader("📜 施術履歴一覧")
-        
-        df_treatments = load_treatments()
-        df_customers = load_customers()
-        
-        search_query = st.text_input("🔍 検索（施術内容または顧客名でフィルター）")
-        if search_query:
-            df_treatments = df_treatments[
-                df_treatments['施術内容'].str.contains(search_query, na=False, case=False) |
-                df_treatments['顧客名'].str.contains(search_query, na=False, case=False)
-            ]
-        
-        # 画像URLカラムをリンクに変換
-        df_treatments = load_treatments()
 
-        # DataFrame のカラム名を適切に変更
+        @st.cache_data(ttl=60)  # API呼び出しを減らす
+        def load_treatments_cached():
+            return load_treatments()
+
+        df_treatments = load_treatments_cached()
+        df_customers = load_customers()
+
+        # 日付カラムを適切なデータ型に変換
+        if "施術日" in df_treatments.columns:
+            df_treatments["施術日"] = pd.to_datetime(df_treatments["施術日"], errors="coerce").dt.strftime("%Y-%m-%d")
+
+        # 🔍 検索機能（AND検索 & 日付検索対応）
+        search_query = st.text_input("🔍 検索（スペース区切りでAND検索、日付も可）")
+
+        if search_query:
+            search_columns = ["顧客名", "施術内容", "施術メモ", "施術日"]  # 🔥 日付も検索対象に追加
+            df_treatments = df_treatments.dropna(subset=search_columns)  # NaNを除去
+
+            # スペース区切りでキーワードをリスト化
+            keywords = search_query.split()
+
+            # すべてのキーワードを含む行のみ抽出（AND検索）
+            for keyword in keywords:
+                df_treatments = df_treatments[
+                    df_treatments[search_columns].apply(lambda row: row.astype(str).str.contains(keyword, case=False, na=False).any(), axis=1)
+                ]
+
+        # DataFrame のカラム名を変更（写真 → 画像URL）
         df_treatments.rename(columns={"写真": "画像URL"}, inplace=True)
 
         # StreamlitのDataFrame表示でリンクを設定
@@ -239,6 +253,8 @@ def main():
             },
             use_container_width=True
         )
+
+
 
         with st.expander("➕ 施術履歴の追加"):
             customer_names = df_customers["顧客名"].tolist()
@@ -264,11 +280,47 @@ def main():
                     st.session_state["customer_updated"] = True  # 更新フラグをセット
                     # st.rerun()
 
+        with st.expander("✏️ 施術履歴の編集"):
+            # 編集用の選択肢を作成（顧客名 | 施術内容 | 施術日）
+            df_treatments["編集候補"] = df_treatments.apply(
+                lambda row: f"{row['顧客名']} | {row['施術内容']} | {row['日付']}", axis=1
+            )
+
+            # 施術履歴を選択
+            edit_option = st.selectbox("✏️ 編集する施術履歴を選択", df_treatments["編集候補"].tolist())
+
+            if edit_option:
+                # 選択されたデータを取得
+                selected_row = df_treatments[df_treatments["編集候補"] == edit_option].iloc[0]
+
+                # 入力フォーム
+                new_treatment = st.text_input("施術内容", selected_row["施術内容"])
+                new_date = st.date_input("日付", pd.to_datetime(selected_row["日付"], errors="coerce"))
+                new_memo = st.text_area("施術メモ", selected_row["施術メモ"])
+
+                if st.button("💾 保存"):
+                    # データを更新
+                    update_treatment(selected_row["顧客名"], new_treatment, new_date, new_memo)
+                    st.success("✅ 施術履歴を更新しました！")
+                    st.session_state["customer_updated"] = True  # 更新フラグをセット
+                    
+
         with st.expander("🗑️ 施術履歴の削除"):
-            delete_name = st.selectbox("👤 削除する施術履歴の顧客名", df_treatments["顧客名"].tolist())
+            # 削除用の選択肢を作成（顧客名 | 施術内容 | 施術日）
+            df_treatments["削除候補"] = df_treatments.apply(
+                lambda row: f"{row['顧客名']} | {row['施術内容']} | {row['日付']}", axis=1
+            )
+
+            # 施術履歴を選択肢に表示
+            delete_option = st.selectbox("👤 削除する施術履歴を選択", df_treatments["削除候補"].tolist())
+
+            # 削除処理
             if st.button("❌ 削除"):
-                delete_treatment(delete_name)
-                st.success(f"🗑️ {delete_name} の施術履歴を削除しました")
+                # 選択されたデータを元に、元の `顧客名` を取得
+                delete_name = delete_option.split(" | ")[0]  # 顧客名を取得
+                delete_treatment(delete_name)  # 削除関数を実行
+
+                st.success(f"🗑️ {delete_option} の施術履歴を削除しました")
                 st.session_state["customer_updated"] = True  # 更新フラグをセット
                 # st.rerun()
 
