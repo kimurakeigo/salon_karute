@@ -1,3 +1,3 @@
 gspread
 build
-googleapiclient
+googleapiclient.discovery
