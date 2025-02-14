@@ -150,12 +150,50 @@ def update_treatment(row_index, updated_data):
     for col_index, value in enumerate(updated_data, start=1):
         sheet.update_cell(row_index + 1, col_index, value)
 
+def update_customer(old_name, updated_data):
+    sheet = client.open("SalonDatabase").worksheet("Customers")
+    data = sheet.get_all_values()
+
+    for i, row in enumerate(data):
+        if row and row[0] == old_name:  # 顧客名が一致する行を探す
+            for col_index, value in enumerate(updated_data, start=1):
+                sheet.update_cell(i + 1, col_index, value)  # セルを更新
+            break
+
 def main():
     st.set_page_config(page_title="美容院カルテ管理", layout="wide")
     st.title("💇‍♀️ 美容院カルテ")
+
+        # ✅ セッションステートに reload_data フラグを追加（初期値は False）
+    if "reload_data" not in st.session_state:
+        st.session_state["reload_data"] = False
+
+    # # ✅ データの読み込み関数
+    # def reload_data():
+    #     st.session_state["reload_data"] = True
+
+    # # ✅ データの再読み込みボタンを追加
+    # st.button("🔄 データを再読み込み", on_click=reload_data)
+
+    # # ✅ データの読み込み（フラグが True のときのみ再読み込み）
+    # @st.cache_data(ttl=10)  # 10秒間キャッシュ
+    # def load_customers_cached():
+    #     return load_customers()
+
+    # df = load_customers_cached()
+
+    # if st.session_state["reload_data"]:
+    #     df_customers = load_customers()  # 顧客データの再読み込み
+    #     df_treatments = load_treatments()  # 施術履歴データの再読み込み
+    #     st.session_state["reload_data"] = False  # フラグをリセット
+    #     st.cache_data.clear()  # キャッシュをクリア
+    # else:
+    #     df_customers = load_customers()  
+    #     df_treatments = load_treatments() 
     
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
+        
     
     if not st.session_state.authenticated:
         st.sidebar.header("🔑 ログイン")
@@ -201,6 +239,27 @@ def main():
                     st.success(f"✅ {name} を追加しました")
                     st.session_state["customer_updated"] = True  # 更新フラグをセット
                     # st.rerun()
+        with st.expander("✏️ 顧客情報の編集"):
+            df_customers = load_customers()
+            
+            if not df_customers.empty:
+                selected_name = st.selectbox("編集する顧客を選択", df_customers["顧客名"].tolist())
+
+                # 選択した顧客の情報を取得
+                selected_customer = df_customers[df_customers["顧客名"] == selected_name].iloc[0]
+
+                # フォームの初期値（key を追加）
+                new_name = st.text_input("👤 顧客名", selected_customer["顧客名"], key="edit_name")
+                new_phone = st.text_input("📞 電話番号", selected_customer["電話番号"], key="edit_phone")
+                new_address = st.text_input("🏠 住所", selected_customer["住所"], key="edit_address")
+                new_note = st.text_area("📝 メモ", selected_customer["メモ"], key="edit_note")
+
+                if st.button("更新"):
+                    update_customer(selected_name, [new_name, new_phone, new_address, new_note])
+                    st.success(f"✅ {selected_name} の情報を更新しました")
+                    st.session_state["customer_updated"] = True
+                    st.rerun()
+
         # 顧客情報の削除
         with st.expander("❌ 顧客情報の削除"):
             delete_name = st.selectbox("削除する顧客を選択", df['顧客名'] if not df.empty else [])
@@ -211,7 +270,7 @@ def main():
                     st.session_state["customer_updated"] = True  # 更新フラグをセット
                     # st.rerun()
 
-        
+      
     elif choice == "✂️ 施術履歴":
         st.subheader("📜 施術履歴一覧")
 
