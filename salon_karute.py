@@ -7,6 +7,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from oauth2client.service_account import ServiceAccountCredentials
 import hashlib
+import re
 
 # パスワードのハッシュ
 def hash_password(password):
@@ -70,6 +71,54 @@ def upload_to_drive(file):
     except Exception as e:
         st.error(f"❌ 画像のアップロードに失敗しました: {e}")
         return None
+    
+def convert_to_katakana(text):
+    """ ひらがなをカタカナに変換 """
+    hira_to_kata = str.maketrans(
+        "ぁあぃいぅうぇえぉおかがきぎくぐけげこごさざしじすずせぜそぞただちぢつづてでとどなにぬねのはばぱひびぴふぶぷへべぺほぼぽまみむめもゃやゅゆょよらりるれろゎわゐゑをん",
+        "ァアィイゥウェエォオカガキギクグケゲコゴサザシジスズセゼソゾタダチヂツヅテデトドナニヌネノハバパヒビピフブプヘベペホボポマミムメモャヤュユョヨラリルレロヮワヰヱヲン"
+    )
+    return text.translate(hira_to_kata)
+
+
+def load_treatments_with_furigana():
+    """施術履歴に顧客情報のフリガナを追加"""
+    sheet_treatments = client.open("SalonDatabase").worksheet("Treatments")
+    data_treatments = sheet_treatments.get_all_records()
+    df_treatments = pd.DataFrame(data_treatments)
+
+    # 顧客情報の取得（顧客名とフリガナの対応を取得）
+    sheet_customers = client.open("SalonDatabase").worksheet("Customers")
+    data_customers = sheet_customers.get_all_records()
+    df_customers = pd.DataFrame(data_customers)
+
+    # 「顧客名」→「フリガナ」の辞書を作成
+    customer_furigana_map = dict(zip(df_customers["顧客名"], df_customers["フリガナ"]))
+
+    # 施術履歴に「フリガナ」列を追加（該当する顧客名があれば追加、なければ空白）
+    df_treatments["フリガナ"] = df_treatments["顧客名"].map(customer_furigana_map).fillna("")
+
+    return df_treatments
+
+# 電話番号を正規表現に
+def format_phone_number(phone_number):
+    # 携帯電話等11桁の電話番号の場合（例: 09012345678）
+    if len(phone_number) == 11:
+        pattern = r"(\d{3})(\d{4})(\d{4})"
+        formatted_phone = re.sub(pattern, r"\1-\2-\3", phone_number)
+    # 市外局番込み10桁の電話番号の場合（例: 0123456789）
+    elif len(phone_number) == 10:
+        pattern = r"(\d{4})(\d{2})(\d{4})"
+        formatted_phone = re.sub(pattern, r"\1-\2-\3", phone_number)
+    # 市外局番なし6桁の電話番号の場合（例: 123456）
+    elif len(phone_number) == 6:
+        pattern = r"(\d{2})(\d{4})"
+        formatted_phone = re.sub(pattern, r"\1-\2", phone_number)
+    else:
+        # それ以外の長さの場合はそのまま返す（エラーチェックなど追加可能）
+        formatted_phone = phone_number
+
+    return formatted_phone
 
 
 # secrets.tomlからGoogle認証情報を取得
@@ -114,7 +163,14 @@ def authenticate(email, password):
 def load_customers():
     sheet = client.open("SalonDatabase").worksheet("Customers")
     data = sheet.get_all_records()
-    return pd.DataFrame(data)
+    # return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+
+    # 電話番号を文字列型に変換
+    if "電話番号" in df.columns:
+        df["電話番号"] = df["電話番号"].astype(str)
+
+    return df
 
 def load_treatments():
     sheet = client.open("SalonDatabase").worksheet("Treatments")
@@ -220,23 +276,37 @@ def main():
 
         df = load_customers_cached()
 
-        search_query = st.text_input("🔍 検索（顧客名でフィルター）")
+        search_query = st.text_input("🔍 検索（顧客名 または フリガナ）")
         if search_query:
-            df = df[df['顧客名'].str.contains(search_query, na=False, case=False)]
+            df = df[df["顧客名"].str.contains(search_query, na=False, case=False) |
+                    df["フリガナ"].str.contains(search_query, na=False, case=False)]
         st.dataframe(df, use_container_width=True)
         
         with st.expander("➕ 顧客情報の追加"):
             col1, col2 = st.columns(2)
             with col1:
                 name = st.text_input("👤 顧客名")
+                furigana = st.text_input("🔤 フリガナ (カタカナのみ)", key="furigana_input")
+                # ひらがなをカタカナに自動変換
+                furigana = convert_to_katakana(furigana)
+
+                # カタカナ以外の文字が含まれていないかチェック
+                if not re.fullmatch(r"[ァ-ヶー]+", furigana) and furigana:
+                    st.warning("⚠ フリガナはカタカナのみで入力してください")
+                    furigana = ""  # 不正な入力をクリア
+
+                # st.text(f"変換後: {furigana}")
+
                 phone = st.text_input("📞 電話番号")
+                phone = format_phone_number(phone)  # 電話番号のフォーマット
+                st.text(f"変換後: {phone}")
             with col2:
                 address = st.text_input("🏠 住所")
                 note = st.text_area("📝 メモ")
             if st.button("追加", use_container_width=True):
                 if name:
-                    save_customer([name, str(phone), address, note])
-                    st.success(f"✅ {name} を追加しました")
+                    save_customer([name, furigana, str(phone), address, note])
+                    st.success(f"✅ {name} ({furigana}) を追加しました")
                     st.session_state["customer_updated"] = True  # 更新フラグをセット
                     # st.rerun()
         with st.expander("✏️ 顧客情報の編集"):
@@ -250,13 +320,14 @@ def main():
 
                 # フォームの初期値（key を追加）
                 new_name = st.text_input("👤 顧客名", selected_customer["顧客名"], key="edit_name")
-                new_phone = st.text_input("📞 電話番号", selected_customer["電話番号"], key="edit_phone")
+                new_furigana = st.text_input("🔤 フリガナ", selected_customer["フリガナ"], key="edit_furigana")
+                new_phone = st.text_input("📞 電話番号", str(selected_customer["電話番号"]), key="edit_phone")  # str に変換
                 new_address = st.text_input("🏠 住所", selected_customer["住所"], key="edit_address")
                 new_note = st.text_area("📝 メモ", selected_customer["メモ"], key="edit_note")
 
                 if st.button("更新"):
-                    update_customer(selected_name, [new_name, new_phone, new_address, new_note])
-                    st.success(f"✅ {selected_name} の情報を更新しました")
+                    update_customer(selected_name, [new_name, new_furigana, new_phone, new_address, new_note])
+                    st.success(f"✅ {selected_name} ({new_furigana}) の情報を更新しました")
                     st.session_state["customer_updated"] = True
                     st.rerun()
 
@@ -276,8 +347,9 @@ def main():
 
         @st.cache_data(ttl=60)  # API呼び出しを減らす
         def load_treatments_cached():
-            return load_treatments()
-
+            # return load_treatments()
+            return load_treatments_with_furigana()
+        
         df_treatments = load_treatments_cached()
         df_customers = load_customers()
 
@@ -289,7 +361,7 @@ def main():
         search_query = st.text_input("🔍 検索（スペース区切りでAND検索、日付も可）")
 
         if search_query:
-            search_columns = ["顧客名", "施術内容", "施術メモ", "日付"]  # 🔥 日付も検索対象に追加
+            search_columns = ["顧客名","フリガナ", "施術内容", "施術メモ", "日付"]  # 🔥 日付も検索対象に追加
             df_treatments = df_treatments.dropna(subset=search_columns)  # NaNを除去
 
             # スペース区切りでキーワードをリスト化
