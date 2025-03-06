@@ -3,26 +3,20 @@ import pandas as pd
 import tempfile
 import gspread
 from google.oauth2.credentials import Credentials
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from oauth2client.service_account import ServiceAccountCredentials
+from googleapiclient.http import MediaIoBaseDownload
 import hashlib
 import re
+import cv2
+import numpy as np
+import io
 
 # パスワードのハッシュ
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
-
-# Falebaseの設定
-firebase_config = {
-    "apiKey": st.secrets["firebase"]["apiKey"],
-    "authDomain": st.secrets["firebase"]["authDomain"],
-    "databaseURL": st.secrets["firebase"]["databaseURL"],
-    "projectId": st.secrets["firebase"]["projectId"],
-    "storageBucket": st.secrets["firebase"]["storageBucket"],
-    "messagingSenderId": st.secrets["firebase"]["messagingSenderId"],
-    "appId": st.secrets["firebase"]["appId"],
-}
 
 # googleの設定
 google_config = {
@@ -33,23 +27,108 @@ google_config = {
     "folder_id": st.secrets["google"]["folder_id"],
 }
 
+# secrets.tomlからGoogle認証情報を取得
+google_creds = st.secrets["google"]
+
+# JSON構造に変換
+creds_dict = {
+    "type": google_creds["type"],
+    "projectId": google_creds["projectId"],
+    "private_key_id": google_creds["private_key_id"],
+    "private_key": google_creds["private_key"].replace("\\n", "\n"),  # 改行コードの修正
+    "client_email": google_creds["client_email"],
+    "client_id": google_creds["client_id"],
+    "auth_uri": google_creds["auth_uri"],
+    "token_uri": google_creds["token_uri"],
+    "auth_provider_x509_cert_url": google_creds["auth_provider_x509_cert_url"],
+    "client_x509_cert_url": google_creds["client_x509_cert_url"],
+}
+
+# Google Sheets APIに接続するための認証設定
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+
+# gspreadに認証情報を渡す
+client = gspread.authorize(creds)
+
+# スプレッドシートにアクセス
+spreadsheet = client.open("SalonUsers")  # スプレッドシート名
+
 def authenticate_google_drive():
     creds_dict = st.secrets["google"]
     
-    creds = Credentials.from_authorized_user_info(
-        {
-            
-            "refresh_token": creds_dict.get("refresh_token"),
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "client_id": creds_dict["client_id"],
-            "client_secret": creds_dict["client_secret"],
-        },
-        scopes=["https://www.googleapis.com/auth/drive.file"],
-    )
-
     # Google Drive APIサービスのインスタンスを作成
-    service = build("drive", "v3", credentials=creds)
+    credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    service = build('drive', 'v3', credentials=credentials)
     return service
+
+# 顔認証
+# Google Drive から画像をダウンロード
+def download_image_from_drive(file_id):
+    service = authenticate_google_drive()
+    request = service.files().get_media(fileId=file_id)
+    file = io.BytesIO()
+    downloader = MediaIoBaseDownload(file, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    file.seek(0)
+    return file   
+
+# 顔認識（OpenCV）を使って認証
+def face_recognition(uploaded_image, registered_image):
+    # 画像を OpenCV 形式に変換
+    img1 = cv2.imdecode(np.frombuffer(uploaded_image.read(), np.uint8), cv2.IMREAD_COLOR)
+    img2 = cv2.imdecode(np.frombuffer(registered_image.read(), np.uint8), cv2.IMREAD_COLOR)
+
+    # グレースケール変換
+    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+
+    # ORB (Oriented FAST and Rotated BRIEF) を使った特徴点検出
+    orb = cv2.ORB_create()
+    kp1, des1 = orb.detectAndCompute(gray1, None)
+    kp2, des2 = orb.detectAndCompute(gray2, None)
+
+    # 特徴点のマッチング
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = bf.match(des1, des2)
+
+    # 類似度（マッチング数）を計算
+    similarity = len(matches)
+
+    return similarity 
+
+ # スプレッドシートからユーザーの登録画像IDを取得
+def get_registered_image_id(user_email):
+    # Google Sheets APIの認証（事前にシートをGoogle Drive APIと連携）
+    
+    spreadsheet = client.open("SalonUsers")  # スプレッドシート名
+    SHEET_ID = spreadsheet.id # スプレッドシートのIDを取得
+    sheet = spreadsheet.worksheet("sheet1")  # シート名 "Users" を指定
+    # RANGE = "Users!A2:B"  # A列にメールアドレス、B列に画像のDrive File ID
+
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    # スプレッドシートの全データを取得
+    values = sheet.get_all_values()
+
+    # ユーザーの顔画像IDを探す
+    for row in values:
+        if row[0] == user_email:  # メールアドレスが一致する場合
+            return row[1]  # 画像ファイルIDを返す
+
+    return None  # 該当するデータがない場合は None を返す
+
+
+# スプレッドシートからユーザーのメールアドレスを取得
+def get_user_email_from_image_id(image_id):
+    sheet = client.open("SalonUsers").sheet1
+    data = sheet.get_all_values()
+    for row in data[1:]:  # ヘッダー行をスキップ
+        if row[1] == image_id:  # 画像IDが一致する場合
+            return row[0]  # メールアドレスを返す
+    return None  # 該当するデータがない場合は None を返す
   
 def upload_to_drive(file):
     try:
@@ -120,45 +199,47 @@ def format_phone_number(phone_number):
 
     return formatted_phone
 
-
-# secrets.tomlからGoogle認証情報を取得
-google_creds = st.secrets["google"]
-
-# JSON構造に変換
-creds_dict = {
-    "type": google_creds["type"],
-    "projectId": google_creds["projectId"],
-    "private_key_id": google_creds["private_key_id"],
-    "private_key": google_creds["private_key"].replace("\\n", "\n"),  # 改行コードの修正
-    "client_email": google_creds["client_email"],
-    "client_id": google_creds["client_id"],
-    "auth_uri": google_creds["auth_uri"],
-    "token_uri": google_creds["token_uri"],
-    "auth_provider_x509_cert_url": google_creds["auth_provider_x509_cert_url"],
-    "client_x509_cert_url": google_creds["client_x509_cert_url"],
-}
-
-# Google Sheets APIに接続するための認証設定
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-
-# gspreadに認証情報を渡す
-client = gspread.authorize(creds)
-
-# スプレッドシートにアクセス
-spreadsheet = client.open("SalonUsers")  # スプレッドシート名
-
 def load_users():
     sheet = client.open("SalonUsers").sheet1
     data = sheet.get_all_records()
     return pd.DataFrame(data)
 
-def authenticate(email, password):
+def authenticate_email_password(email, password):
     users = load_users()
     hashed_input = hash_password(password)
     if any((users['Email'] == email) & (users['Password'] == hashed_input)):
         return True
     return False
+
+def authenticate_face(uploaded_image):
+    try:
+        users = load_users()
+        if users is None:
+            st.error("ユーザーデータの読み込みに失敗しました。")
+            return None
+
+        for index, row in users.iterrows():
+            registered_image_id = row["FaceID"]
+            if registered_image_id:
+                registered_image = download_image_from_drive(registered_image_id)
+                if registered_image is None:
+                    st.error(f"登録画像 ({registered_image_id}) のダウンロードに失敗しました。")
+                    continue  # 次のユーザーへ
+
+                similarity = face_recognition(uploaded_image, registered_image)
+                if similarity is None:
+                    st.error("顔認識処理でエラーが発生しました。")
+                    continue # 次のユーザーへ
+
+                if similarity > 1:
+                    return row["Email"]  # 認証成功時にEmailを返す
+        return None  # 認証失敗時にNoneを返す
+
+    except Exception as e:
+        st.error(f"予期せぬエラーが発生しました: {e}")
+        st.error(f"Clearphotoを押して再度顔を認証してみてください")
+        return None
+
 
 def load_customers():
     sheet = client.open("SalonDatabase").worksheet("Customers")
@@ -220,49 +301,42 @@ def main():
     st.set_page_config(page_title="美容院カルテ管理", layout="wide")
     st.title("💇‍♀️ 美容院カルテ")
 
-        # ✅ セッションステートに reload_data フラグを追加（初期値は False）
+    # ✅ セッションステートに reload_data フラグを追加（初期値は False）
     if "reload_data" not in st.session_state:
         st.session_state["reload_data"] = False
-
-    # # ✅ データの読み込み関数
-    # def reload_data():
-    #     st.session_state["reload_data"] = True
-
-    # # ✅ データの再読み込みボタンを追加
-    # st.button("🔄 データを再読み込み", on_click=reload_data)
-
-    # # ✅ データの読み込み（フラグが True のときのみ再読み込み）
-    # @st.cache_data(ttl=10)  # 10秒間キャッシュ
-    # def load_customers_cached():
-    #     return load_customers()
-
-    # df = load_customers_cached()
-
-    # if st.session_state["reload_data"]:
-    #     df_customers = load_customers()  # 顧客データの再読み込み
-    #     df_treatments = load_treatments()  # 施術履歴データの再読み込み
-    #     st.session_state["reload_data"] = False  # フラグをリセット
-    #     st.cache_data.clear()  # キャッシュをクリア
-    # else:
-    #     df_customers = load_customers()  
-    #     df_treatments = load_treatments() 
     
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
         
     
     if not st.session_state.authenticated:
-        st.sidebar.header("🔑 ログイン")
-        email = st.sidebar.text_input("📧 ユーザー名")
-        password = st.sidebar.text_input("🔒 パスワード", type="password")
-        if st.sidebar.button("ログイン", use_container_width=True):
-            if authenticate(email, password):
-                st.session_state.authenticated = True
-                st.sidebar.success("✅ ログイン成功！")
-                st.rerun()
-            else:
-                st.sidebar.error("❌ ログイン失敗")
+        st.sidebar.header(" ログイン")
+        login_method = st.sidebar.radio("ログイン方法を選択してください", ("ユーザー名とパスワード", "カメラ認証"))
+
+        if login_method == "ユーザー名とパスワード":
+            email = st.sidebar.text_input(" ユーザー名")
+            password = st.sidebar.text_input(" パスワード", type="password")
+            if st.sidebar.button("ログイン", use_container_width=True):
+                if authenticate_email_password(email, password):
+                    st.session_state.authenticated = True
+                    st.sidebar.success("✅ ログイン成功！")
+                    st.rerun()
+                else:
+                    st.sidebar.error("❌ ログイン失敗")
+        else:
+            uploaded_image = st.sidebar.camera_input("カメラで撮影")
+            if st.sidebar.button("ログイン", use_container_width=True):
+                email = authenticate_face(uploaded_image)
+                if email:
+                    st.session_state.authenticated = True
+                    st.session_state.user_email = email  # ユーザーのEmailをセッションに保存
+                    st.sidebar.success(f"✅ ログイン成功！")  # Emailを表示
+                    st.rerun()
+                else:
+                    st.sidebar.error("❌ ログイン失敗")
         return
+
+
     
     menu = ["👤 顧客情報", "✂️ 施術履歴", "🚪 ログアウト"]
     choice = st.sidebar.radio("メニュー", menu)
